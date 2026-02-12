@@ -7,6 +7,8 @@ services:
       - "8998:8998"
     environment:
       - NO_TORCH_COMPILE=1
+      # Optional: agent-service handoff URL. When set, Persona POSTs { phone, transcript } here when a session ends.
+      - HANDOFF_URL=${HANDOFF_URL:-}
     env_file:
       - .env
     deploy:

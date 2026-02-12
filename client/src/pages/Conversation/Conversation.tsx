@@ -20,6 +20,8 @@ type ConversationProps = {
   sessionAuthId?: string;
   sessionId?: number;
   email?: string;
+  /** User phone (e.g. WhatsApp). When set and Persona has HANDOFF_URL, handoff POST is sent on session end */
+  phone?: string;
   theme: ThemeType;
   audioContext: MutableRefObject<AudioContext|null>;
   worklet: MutableRefObject<AudioWorkletNode|null>;
@@ -34,6 +36,7 @@ const buildURL = ({
   params,
   workerAuthId,
   email,
+  phone,
   textSeed,
   audioSeed,
 }: {
@@ -41,6 +44,8 @@ const buildURL = ({
   params: ModelParamsValues;
   workerAuthId?: string;
   email?: string;
+  /** When HANDOFF_URL is set on Persona, pass user WhatsApp number so handoff POST includes it */
+  phone?: string;
   textSeed: number;
   audioSeed: number;
 }) => {
@@ -59,6 +64,9 @@ const buildURL = ({
   }
   if(email) {
     url.searchParams.append("email", email);
+  }
+  if(phone) {
+    url.searchParams.append("phone", phone);
   }
   url.searchParams.append("text_temperature", params.textTemperature.toString());
   url.searchParams.append("text_topk", params.textTopk.toString());
@@ -87,6 +95,7 @@ export const Conversation:FC<ConversationProps> = ({
   startConnection,
   isBypass=false,
   email,
+  phone,
   theme,
   ...params
 }) => {
@@ -118,6 +127,7 @@ export const Conversation:FC<ConversationProps> = ({
     params: modelParams,
     workerAuthId,
     email: email,
+    phone,
     textSeed: textSeed,
     audioSeed: audioSeed,
   });

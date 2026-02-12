@@ -31,8 +31,12 @@ See [ARCHITECTURE.md](./ARCHITECTURE.md) for details.
    ```
 
 4. **Handoff from Persona**
-   - After the voice call, your Persona backend should POST to `https://<your-domain>/handoff`:
+   - Run Persona (Moshi) separately and set **`HANDOFF_URL`** to your agent-service handoff endpoint, e.g. `https://<your-domain>/handoff`.
+   - When a voice session ends, Persona will POST to that URL if the client provided a `phone` query param on the WebSocket.
+   - Example (what Persona sends): `{ "phone": "+1234567890", "transcript": "..." }`.
+   - You can also call the handoff API yourself from any backend:
    ```json
+   POST /handoff
    { "phone": "+1234567890", "transcript": "User said they want a todo app with dark mode..." }
    ```
 

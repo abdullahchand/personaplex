@@ -96,12 +96,13 @@ class ServerState:
 
     def __init__(self, mimi: MimiModel, other_mimi: MimiModel, text_tokenizer: sentencepiece.SentencePieceProcessor,
                  lm: LMModel, device: str | torch.device, voice_prompt_dir: str | None = None,
-                 save_voice_prompt_embeddings: bool = False):
+                 save_voice_prompt_embeddings: bool = False, handoff_url: Optional[str] = None):
         self.mimi = mimi
         self.other_mimi = other_mimi
         self.text_tokenizer = text_tokenizer
         self.device = device
         self.voice_prompt_dir = voice_prompt_dir
+        self.handoff_url = (handoff_url or "").strip() or None
         self.frame_size = int(self.mimi.sample_rate / self.mimi.frame_rate)
         self.lm_gen = LMGen(lm,
                             audio_silence_frame_cnt=int(0.5 * self.mimi.frame_rate),
@@ -170,6 +171,9 @@ class ServerState:
         self.lm_gen.text_prompt_tokens = self.text_tokenizer.encode(wrap_with_system_tags(request.query["text_prompt"])) if len(request.query["text_prompt"]) > 0 else None
         seed = int(request["seed"]) if "seed" in request.query else None
 
+        phone = request.query.get("phone", "").strip()
+        transcript_parts: list[str] = []
+
         async def recv_loop():
             nonlocal close
             try:
@@ -236,6 +240,7 @@ class ServerState:
                         if text_token not in (0, 3):
                             _text = self.text_tokenizer.id_to_piece(text_token)  # type: ignore
                             _text = _text.replace("▁", " ")
+                            transcript_parts.append(_text)
                             msg = b"\x02" + bytes(_text, encoding="utf8")
                             await ws.send_bytes(msg)
                         else:
@@ -304,6 +309,21 @@ class ServerState:
                         pass
                 await ws.close()
                 clog.log("info", "session closed")
+                # Optional: POST handoff (phone + transcript) to agent-service when HANDOFF_URL is set
+                if self.handoff_url and phone:
+                    transcript_text = " ".join(transcript_parts).strip() if transcript_parts else ""
+                    try:
+                        async with aiohttp.ClientSession() as session:
+                            payload = {"phone": phone, "transcript": transcript_text or "(no transcript)"}
+                            async with session.post(self.handoff_url, json=payload) as resp:
+                                if resp.status >= 400:
+                                    clog.log("error", f"handoff POST failed: {resp.status} {await resp.text()}")
+                                else:
+                                    clog.log("info", f"handoff sent to {self.handoff_url}")
+                    except Exception as e:
+                        clog.log("error", f"handoff POST error: {e}")
+                elif self.handoff_url and not phone:
+                    clog.log("warning", "handoff_url set but no phone in query; skip handoff")
                 # await asyncio.gather(opus_loop(), recv_loop(), send_loop())
         clog.log("info", "done with connection")
         return ws
@@ -390,6 +410,13 @@ def main():
             "that contains valid key.pem and cert.pem files"
         )
     )
+    parser.add_argument(
+        "--handoff-url",
+        type=str,
+        default=os.environ.get("HANDOFF_URL", ""),
+        help="When set, POST { phone, transcript } to this URL when a session ends. "
+             "Used to hand off to agent-service. Client must pass phone as query param.",
+    )
 
     args = parser.parse_args()
     args.voice_prompt_dir = _get_voice_prompt_dir(
@@ -453,6 +480,7 @@ def main():
         device=args.device,
         voice_prompt_dir=args.voice_prompt_dir,
         save_voice_prompt_embeddings=False,
+        handoff_url=args.handoff_url or None,
     )
     logger.info("warming up the model")
     state.warmup()
