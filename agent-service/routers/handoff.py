@@ -60,8 +60,8 @@ async def handoff(body: HandoffBody):
         s.state = session_svc.SESSION_STATE_READY_TO_BUILD
         session_svc.set_session(session_key, s)
         if phone:
-            whatsapp.send_text(phone, msg)
-            whatsapp.send_text(
+            await whatsapp.send_text(phone, msg)
+            await whatsapp.send_text(
                 phone,
                 f"Cost estimate: {s.cost_estimate_band}. Open this link to create your app (you'll need a Lovable account):\n{s.lovable_url}",
             )
@@ -71,6 +71,6 @@ async def handoff(body: HandoffBody):
         s.clarification_messages.append({"role": "assistant", "content": msg})
         session_svc.set_session(session_key, s)
         if phone:
-            whatsapp.send_text(phone, msg)
+            await whatsapp.send_text(phone, msg)
 
     return {"ok": True, "phone": phone or None, "state": s.state}

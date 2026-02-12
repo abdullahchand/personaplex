@@ -11,6 +11,8 @@ class Settings(BaseSettings):
     whatsapp_phone_number_id: str = ""
     whatsapp_access_token: str = ""
     webhook_verify_token: str = ""
+    whatsapp_app_id: str | int | None = None  # optional; for pywa callback registration & update validation
+    whatsapp_app_secret: str | None = None
 
     base_url: str = "http://localhost:8000"
 

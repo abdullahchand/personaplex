@@ -1,60 +1,88 @@
-"""WhatsApp Cloud API: send message, parse webhook payload."""
+"""WhatsApp via pywa: send messages and handle incoming webhook (agent logic)."""
 from __future__ import annotations
 
-from typing import Any
-
-import httpx
-
+from pywa_async import WhatsApp, filters, types
+from pywa_async.handlers import MessageHandler
 from config import settings
 
-SEND_URL_TEMPLATE = (
-    "https://graph.facebook.com/v18.0/{phone_id}/messages"
-)
+_wa: WhatsApp | None = None
 
 
-def send_text(to_phone: str, text: str) -> dict[str, Any]:
+def init_whatsapp(app):
     """
-    Send a text message to the user. to_phone: E.164 format (e.g. +1234567890).
+    Create the WhatsApp client and register the webhook route on the FastAPI app.
+    Call this from main after creating the app. Registers GET/POST at webhook_endpoint.
     """
-    url = SEND_URL_TEMPLATE.format(phone_id=settings.whatsapp_phone_number_id)
-    payload = {
-        "messaging_product": "whatsapp",
-        "recipient_type": "individual",
-        "to": to_phone.lstrip("+"),
-        "type": "text",
-        "text": {"body": text[:4096]},
-    }
-    headers = {
-        "Authorization": f"Bearer {settings.whatsapp_access_token}",
-        "Content-Type": "application/json",
-    }
-    with httpx.Client() as client:
-        r = client.post(url, json=payload, headers=headers, timeout=15.0)
-        r.raise_for_status()
-        return r.json()
+    global _wa
+    # Only pass callback_url when app_id and app_secret are set (pywa requires both to register the webhook)
+    has_app_creds = bool(settings.whatsapp_app_id and settings.whatsapp_app_secret)
+    callback_url = (settings.base_url or "").rstrip("/") if has_app_creds else None
+    _wa = WhatsApp(
+        phone_id=settings.whatsapp_phone_number_id,
+        token=settings.whatsapp_access_token,
+        server=app,
+        webhook_endpoint="/webhooks/whatsapp",
+        verify_token=settings.webhook_verify_token,
+        callback_url=callback_url,
+        app_id=settings.whatsapp_app_id if has_app_creds else None,
+        app_secret=settings.whatsapp_app_secret if has_app_creds else None,
+    )
+    _wa.add_handlers(MessageHandler(_handle_message, filters.text, priority=1))
+    return _wa
 
 
-def parse_incoming_message(body: dict) -> tuple[str | None, str | None]:
-    """
-    Extract (sender_phone, text) from WhatsApp webhook body.
-    Returns (None, None) if not a simple text message we handle.
-    """
-    try:
-        entry = body.get("entry", [{}])[0]
-        changes = entry.get("changes", [{}])[0]
-        value = changes.get("value", {})
-        messages = value.get("messages")
-        if not messages:
-            return None, None
-        msg = messages[0]
-        if msg.get("type") != "text":
-            return None, None
-        from_ = msg.get("from")
-        text = (msg.get("text", {}) or {}).get("body", "").strip()
-        if not from_ or not text:
-            return None, None
-        # from_ is WhatsApp ID; we need E.164. Often it's already the number without +.
-        phone = f"+{from_}" if not from_.startswith("+") else from_
-        return phone, text
-    except (IndexError, KeyError, TypeError):
-        return None, None
+async def _handle_message(client: WhatsApp, msg: types.Message):
+    """Handle incoming text: find session, call GPT agent, send reply (and optionally Lovable link)."""
+    from services import gpt, lovable, cost_estimate, session as session_svc
+
+    text = (msg.text or "").strip() if msg.text else ""
+    if not text:
+        return
+    # wa_id is the sender's WhatsApp ID (number as string, no +)
+    from_wa_id = getattr(msg.from_user, "wa_id", None) or ""
+    phone = f"+{from_wa_id}" if from_wa_id and not from_wa_id.startswith("+") else from_wa_id
+
+    s = session_svc.get_session(phone)
+    if not s:
+        await client.send_message(to=phone, text=(
+            "We don't have an active request for this number. "
+            "Please start by calling us so we can collect your requirements."
+        ))
+        return
+
+    s.clarification_messages.append({"role": "user", "content": text})
+    out = await gpt.agent_next(
+        enhanced_prompt=s.enhanced_prompt,
+        clarification_history=s.clarification_messages[:-1],
+        user_last_message=text,
+    )
+
+    if out.get("updated_prompt"):
+        s.enhanced_prompt = out["updated_prompt"]
+
+    msg_text = out.get("message", "Got it. We'll send your link shortly.")
+
+    if out.get("action") == "send_link":
+        s.cost_estimate_band = cost_estimate.estimate_credit_band(s.enhanced_prompt)
+        s.lovable_url = lovable.build_lovable_url(s.enhanced_prompt)
+        s.state = session_svc.SESSION_STATE_READY_TO_BUILD
+        session_svc.set_session(phone, s)
+        await client.send_message(to=phone, text=msg_text)
+        await client.send_message(
+            to=phone,
+            text=f"Cost estimate: {s.cost_estimate_band}. Open this link to create your app (you'll need a Lovable account):\n{s.lovable_url}",
+        )
+        s.state = session_svc.SESSION_STATE_LINK_SENT
+        session_svc.set_session(phone, s)
+    else:
+        s.clarification_messages.append({"role": "assistant", "content": msg_text})
+        session_svc.set_session(phone, s)
+        await client.send_message(to=phone, text=msg_text)
+
+
+async def send_text(to_phone: str, text: str) -> None:
+    """Send a text message. to_phone: E.164 format (e.g. +1234567890). Requires init_whatsapp() first."""
+    if _wa is None:
+        raise RuntimeError("WhatsApp client not initialized; call init_whatsapp(app) first.")
+    to = to_phone.lstrip("+") if to_phone.startswith("+") else to_phone
+    await _wa.send_message(to=to, text=text[:4096])

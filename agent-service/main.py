@@ -2,12 +2,13 @@
 Voice → GPT → WhatsApp → Lovable agent service.
 
 - POST /handoff: receive transcript + phone from Persona
-- GET/POST /webhooks/whatsapp: WhatsApp webhook
+- GET/POST /webhooks/whatsapp: WhatsApp webhook (handled by pywa)
 """
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from routers import handoff, webhooks
+from routers import handoff
+from services import whatsapp as whatsapp_svc
 
 app = FastAPI(
     title="Voice-to-Lovable Agent",
@@ -16,7 +17,7 @@ app = FastAPI(
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 app.include_router(handoff.router)
-app.include_router(webhooks.router)
+whatsapp_svc.init_whatsapp(app)
 
 
 @app.get("/health")

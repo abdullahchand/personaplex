@@ -310,11 +310,11 @@ class ServerState:
                 await ws.close()
                 clog.log("info", "session closed")
                 # Optional: POST handoff (phone + transcript) to agent-service when HANDOFF_URL is set
-                if self.handoff_url and phone:
+                if self.handoff_url:
                     transcript_text = " ".join(transcript_parts).strip() if transcript_parts else ""
                     try:
                         async with aiohttp.ClientSession() as session:
-                            payload = {"phone": phone, "transcript": transcript_text or "(no transcript)"}
+                            payload = {"phone": phone or "", "transcript": transcript_text or "(no transcript)"}
                             async with session.post(self.handoff_url, json=payload) as resp:
                                 if resp.status >= 400:
                                     clog.log("error", f"handoff POST failed: {resp.status} {await resp.text()}")
@@ -322,8 +322,6 @@ class ServerState:
                                     clog.log("info", f"handoff sent to {self.handoff_url}")
                     except Exception as e:
                         clog.log("error", f"handoff POST error: {e}")
-                elif self.handoff_url and not phone:
-                    clog.log("warning", "handoff_url set but no phone in query; skip handoff")
                 # await asyncio.gather(opus_loop(), recv_loop(), send_loop())
         clog.log("info", "done with connection")
         return ws
