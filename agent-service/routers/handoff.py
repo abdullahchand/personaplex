@@ -11,7 +11,7 @@ router = APIRouter(prefix="/handoff", tags=["handoff"])
 
 
 class HandoffBody(BaseModel):
-    phone: str
+    phone: str | None = None  # optional; when missing, session is stored as "pending" and no WhatsApp is sent
     transcript: str | None = None
     summary: str | None = None
 
@@ -35,12 +35,12 @@ async def handoff(body: HandoffBody):
     except ValueError as e:
         raise HTTPException(422, str(e))
 
-    phone = body.phone.strip()
-    if not phone:
-        raise HTTPException(422, "phone required")
+    phone = (body.phone or "").strip()
+    # Use placeholder key when no phone yet (e.g. Persona sent transcript only; phone can be added later)
+    session_key = phone or "pending"
 
     enhanced = await gpt.enhance_prompt(text)
-    s = session_svc.create_session(phone, text, enhanced)
+    s = session_svc.create_session(session_key, text, enhanced)
 
     # First message after handoff: intro and offer to clarify or send link.
     # We pass a synthetic "user" message so the agent produces the first assistant reply.
@@ -58,17 +58,19 @@ async def handoff(body: HandoffBody):
         s.cost_estimate_band = cost_estimate.estimate_credit_band(s.enhanced_prompt)
         s.lovable_url = lovable.build_lovable_url(s.enhanced_prompt)
         s.state = session_svc.SESSION_STATE_READY_TO_BUILD
-        session_svc.set_session(phone, s)
-        whatsapp.send_text(phone, msg)
-        whatsapp.send_text(
-            phone,
-            f"Cost estimate: {s.cost_estimate_band}. Open this link to create your app (you'll need a Lovable account):\n{s.lovable_url}",
-        )
+        session_svc.set_session(session_key, s)
+        if phone:
+            whatsapp.send_text(phone, msg)
+            whatsapp.send_text(
+                phone,
+                f"Cost estimate: {s.cost_estimate_band}. Open this link to create your app (you'll need a Lovable account):\n{s.lovable_url}",
+            )
         s.state = session_svc.SESSION_STATE_LINK_SENT
-        session_svc.set_session(phone, s)
+        session_svc.set_session(session_key, s)
     else:
         s.clarification_messages.append({"role": "assistant", "content": msg})
-        session_svc.set_session(phone, s)
-        whatsapp.send_text(phone, msg)
+        session_svc.set_session(session_key, s)
+        if phone:
+            whatsapp.send_text(phone, msg)
 
-    return {"ok": True, "phone": phone, "state": s.state}
+    return {"ok": True, "phone": phone or None, "state": s.state}
