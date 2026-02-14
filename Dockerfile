@@ -1,3 +1,4 @@
+# Persona (Moshi) voice server; includes server-side user STT (Whisper) for handoff transcript
 ARG BASE_IMAGE="nvcr.io/nvidia/cuda"
 ARG BASE_IMAGE_TAG="12.4.1-runtime-ubuntu22.04"
 
@@ -9,6 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     pkg-config \
     libopus-dev \
+    ffmpeg \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app/moshi/

@@ -52,6 +52,31 @@ from .utils.logging import setup_logger, ColorizedLog
 
 
 logger = setup_logger(__name__)
+
+# Lazy-loaded Whisper model for server-side user speech-to-text
+_whisper_model = None
+
+
+def _get_whisper_model():
+    global _whisper_model
+    if _whisper_model is None:
+        import whisper
+        _whisper_model = whisper.load_model("base")
+    return _whisper_model
+
+
+def _transcribe_user_audio_sync(pcm_24k: np.ndarray, sample_rate: int = 24000) -> str:
+    """Transcribe user PCM (float32, mono) from 24kHz to text using Whisper."""
+    from scipy.signal import resample
+    pcm_flat = np.asarray(pcm_24k).flatten().astype(np.float32)
+    if pcm_flat.size < 1000:
+        return ""
+    # Whisper expects 16 kHz
+    num_16k = int(round(pcm_flat.size * 16000 / sample_rate))
+    audio_16k = resample(pcm_flat, num_16k).astype(np.float32)
+    model = _get_whisper_model()
+    result = model.transcribe(audio_16k, fp16=torch.cuda.is_available(), language="en")
+    return (result.get("text") or "").strip()
 DeviceString = Literal["cuda"] | Literal["cpu"] #| Literal["mps"]
 
 def torch_auto_device(requested: Optional[DeviceString] = None) -> torch.device:
@@ -172,7 +197,8 @@ class ServerState:
         seed = int(request["seed"]) if "seed" in request.query else None
 
         phone = request.query.get("phone", "").strip()
-        transcript_parts: list[str] = []
+        transcript_parts: list[str] = []  # what the agent (Persona) said
+        user_pcm_chunks: list[np.ndarray] = []  # accumulate user audio for server-side STT
 
         async def recv_loop():
             nonlocal close
@@ -223,6 +249,8 @@ class ServerState:
                     be = time.time()
                     chunk = all_pcm_data[: self.frame_size]
                     all_pcm_data = all_pcm_data[self.frame_size:]
+                    # Accumulate user PCM for server-side speech-to-text at session end
+                    user_pcm_chunks.append(np.array(chunk, dtype=np.float32))
                     chunk = torch.from_numpy(chunk)
                     chunk = chunk.to(device=self.device)[None, None]
                     codes = self.mimi.encode(chunk)
@@ -311,7 +339,25 @@ class ServerState:
                 clog.log("info", "session closed")
                 # Optional: POST handoff (phone + transcript) to agent-service when HANDOFF_URL is set
                 if self.handoff_url:
-                    transcript_text = " ".join(transcript_parts).strip() if transcript_parts else ""
+                    # Server-side STT for user speech
+                    user_text = ""
+                    if user_pcm_chunks:
+                        try:
+                            user_audio = np.concatenate([c.flatten() for c in user_pcm_chunks])
+                            user_text = await asyncio.to_thread(
+                                _transcribe_user_audio_sync, user_audio, self.mimi.sample_rate
+                            )
+                        except Exception as e:
+                            clog.log("warning", f"user STT failed: {e}")
+                    agent_text = " ".join(transcript_parts).strip() if transcript_parts else ""
+                    if user_text and agent_text:
+                        transcript_text = f"User: {user_text}\n\nAgent: {agent_text}"
+                    elif user_text:
+                        transcript_text = f"User: {user_text}"
+                    elif agent_text:
+                        transcript_text = f"Agent: {agent_text}"
+                    else:
+                        transcript_text = "(no transcript)"
                     try:
                         async with aiohttp.ClientSession() as session:
                             payload = {"phone": phone or "", "transcript": transcript_text or "(no transcript)"}
