@@ -52,15 +52,18 @@ Respond with a JSON object only, no markdown:
 async def enhance_prompt(transcript_or_summary: str) -> str:
     """Turn raw transcript/summary into a single Lovable-ready prompt."""
     client = _client_get()
+    messages = [
+        {"role": "system", "content": ENHANCE_SYSTEM},
+        {"role": "user", "content": transcript_or_summary},
+    ]
+    print("[GPT enhance] request:", json.dumps({"model": settings.openai_model_enhance, "temperature": 0.3, "messages": messages}, indent=2, ensure_ascii=False))
     r = await client.chat.completions.create(
         model=settings.openai_model_enhance,
-        messages=[
-            {"role": "system", "content": ENHANCE_SYSTEM},
-            {"role": "user", "content": transcript_or_summary},
-        ],
+        messages=messages,
         temperature=0.3,
     )
     text = (r.choices[0].message.content or "").strip()
+    print("[GPT enhance] response:", repr(text))
     return text
 
 
@@ -93,10 +96,14 @@ async def agent_next(
         messages.append({"role": entry["role"], "content": entry["content"]})
     messages.append({"role": "user", "content": user_last_message})
 
+    print("[GPT agent] request:", json.dumps({"model": settings.openai_model_agent, "temperature": 0.2, "messages": messages}, indent=2, ensure_ascii=False))
     r = await client.chat.completions.create(
         model=settings.openai_model_agent,
         messages=messages,
         temperature=0.2,
     )
     raw = (r.choices[0].message.content or "").strip()
-    return _parse_agent_response(raw)
+    print("[GPT agent] response (raw):", repr(raw))
+    out = _parse_agent_response(raw)
+    print("[GPT agent] response (parsed):", json.dumps(out, indent=2, ensure_ascii=False))
+    return out
