@@ -64,14 +64,16 @@ async def _handle_message(client: WhatsApp, msg: types.Message):
 
     if out.get("action") == "send_link":
         s.cost_estimate_band = cost_estimate.estimate_credit_band(s.enhanced_prompt)
-        s.lovable_url = lovable.build_lovable_url(s.enhanced_prompt)
+        s.lovable_url, link_message = lovable.create_and_format_link_message(
+            s.enhanced_prompt, s.cost_estimate_band
+        )
+        print(f"[WhatsApp] send_link: created Lovable URL (cost={s.cost_estimate_band})")
+        print(f"[WhatsApp] lovable_url={s.lovable_url}")
         s.state = session_svc.SESSION_STATE_READY_TO_BUILD
         session_svc.set_session(phone, s)
         await client.send_message(to=phone, text=msg_text)
-        await client.send_message(
-            to=phone,
-            text=f"Cost estimate: {s.cost_estimate_band}. Open this link to create your app (you'll need a Lovable account):\n{s.lovable_url}",
-        )
+        await client.send_message(to=phone, text=link_message)
+        print(f"[WhatsApp] sent intro + link message to {phone}")
         s.state = session_svc.SESSION_STATE_LINK_SENT
         session_svc.set_session(phone, s)
     else:

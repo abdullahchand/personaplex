@@ -56,15 +56,19 @@ async def handoff(body: HandoffBody):
 
     if out.get("action") == "send_link":
         s.cost_estimate_band = cost_estimate.estimate_credit_band(s.enhanced_prompt)
-        s.lovable_url = lovable.build_lovable_url(s.enhanced_prompt)
+        s.lovable_url, link_message = lovable.create_and_format_link_message(
+            s.enhanced_prompt, s.cost_estimate_band
+        )
+        print(f"[handoff] send_link: created Lovable URL (cost={s.cost_estimate_band})")
+        print(f"[handoff] lovable_url={s.lovable_url}")
         s.state = session_svc.SESSION_STATE_READY_TO_BUILD
         session_svc.set_session(session_key, s)
         if phone:
             await whatsapp.send_text(phone, msg)
-            await whatsapp.send_text(
-                phone,
-                f"Cost estimate: {s.cost_estimate_band}. Open this link to create your app (you'll need a Lovable account):\n{s.lovable_url}",
-            )
+            await whatsapp.send_text(phone, link_message)
+            print(f"[handoff] sent intro + link message to {phone}")
+        else:
+            print("[handoff] no phone; link not sent via WhatsApp (session stored)")
         s.state = session_svc.SESSION_STATE_LINK_SENT
         session_svc.set_session(session_key, s)
     else:
