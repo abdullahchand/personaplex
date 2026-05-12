@@ -15,9 +15,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app/moshi/
 
+# uv defaults to reflinks/hardlinks that often fail on Docker/WSL overlay (EAGAIN on large wheels).
+ENV UV_LINK_MODE=copy \
+    UV_CONCURRENT_INSTALLS=1 \
+    UV_CONCURRENT_DOWNLOADS=4
+
 COPY moshi/ /app/moshi/
 RUN uv venv /app/moshi/.venv --python 3.12
-RUN uv sync
+RUN uv sync --link-mode copy
 
 RUN mkdir -p /app/ssl
 

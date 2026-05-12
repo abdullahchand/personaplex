@@ -173,3 +173,17 @@ If you use PersonaPlex in your research, please cite our paper:
   year={2026}
 }
 ```
+## Running with Docker
+
+```bash
+docker build -t persona:latest .
+docker run -it --rm --network host \
+  -v ~/.cache/huggingface:/hf_cache \
+  -e HF_HOME=/hf_cache \
+  -e HF_TOKEN="$HF_TOKEN" \
+  -e TORCH_COMPILE_DISABLE=1 \
+  -e HANDOFF_URL=http://localhost:8000/handoff \
+  persona:latest
+```
+
+Set `HF_TOKEN` in your shell from a Hugging Face user access token; do not commit tokens to the repository.
