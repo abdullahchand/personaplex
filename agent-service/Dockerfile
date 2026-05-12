@@ -1,4 +1,4 @@
-# Agent service: Voice → GPT → WhatsApp → Lovable
+# Agent service: conversation WAV → Whisper → GPT → build webhook (+ optional WhatsApp)
 FROM python:3.12-slim
 
 WORKDIR /app

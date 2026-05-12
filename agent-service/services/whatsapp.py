@@ -32,8 +32,8 @@ def init_whatsapp(app):
 
 
 async def _handle_message(client: WhatsApp, msg: types.Message):
-    """Handle incoming text: find session, call GPT agent, send reply (and optionally Lovable link)."""
-    from services import gpt, lovable, cost_estimate, session as session_svc
+    """Handle incoming text: find session, call GPT agent, send reply (and forward spec when done)."""
+    from services import build_webhook, gpt, session as session_svc
 
     text = (msg.text or "").strip() if msg.text else ""
     if not text:
@@ -60,21 +60,25 @@ async def _handle_message(client: WhatsApp, msg: types.Message):
     if out.get("updated_prompt"):
         s.enhanced_prompt = out["updated_prompt"]
 
-    msg_text = out.get("message", "Got it. We'll send your link shortly.")
+    msg_text = out.get("message", "Got it. We'll update the builder shortly.")
 
     if out.get("action") == "send_link":
-        s.cost_estimate_band = cost_estimate.estimate_credit_band(s.enhanced_prompt)
-        s.lovable_url, link_message = lovable.create_and_format_link_message(
-            s.enhanced_prompt, s.cost_estimate_band
+        status, _ = await build_webhook.forward_cleaned_prompt(
+            s.enhanced_prompt,
+            s.transcript_or_summary,
+            phone,
         )
-        print(f"[WhatsApp] send_link: created Lovable URL (cost={s.cost_estimate_band})")
-        print(f"[WhatsApp] lovable_url={s.lovable_url}")
+        print(f"[WhatsApp] send_link: build_webhook status={status}")
         s.state = session_svc.SESSION_STATE_READY_TO_BUILD
         session_svc.set_session(phone, s)
         await client.send_message(to=phone, text=msg_text)
-        await client.send_message(to=phone, text=link_message)
-        print(f"[WhatsApp] sent intro + link message to {phone}")
-        s.state = session_svc.SESSION_STATE_LINK_SENT
+        follow = (
+            "Your specification has been sent to the builder."
+            if status and status < 400
+            else "We've saved your latest specification. If automatic forwarding failed, we'll follow up."
+        )
+        await client.send_message(to=phone, text=follow)
+        s.state = session_svc.SESSION_STATE_FORWARDED
         session_svc.set_session(phone, s)
     else:
         s.clarification_messages.append({"role": "assistant", "content": msg_text})

@@ -1,4 +1,4 @@
-"""GPT: (1) enhance transcript into Lovable prompt, (2) agent next-action + message."""
+"""GPT: (1) clean raw transcript for a builder webhook, (2) WhatsApp agent next-action + message."""
 from __future__ import annotations
 
 import json
@@ -22,48 +22,48 @@ def _client_get() -> AsyncOpenAI:
     return _client
 
 
-ENHANCE_SYSTEM = """You are a product assistant. Given a raw transcript or summary of a user describing an app or website they want built, output a single, clear prompt suitable for an AI app builder (Lovable).
+CLEAN_FOR_BUILDER_SYSTEM = """You are a product assistant. Given a raw transcript of a conversation (user and possibly an assistant) about an app or website the user wants built, output a single, clear specification suitable for an automated builder or downstream service.
 
 Rules:
 - One short paragraph (2-5 sentences).
-- Focus on: what the app does, main features, and any style (e.g. "landing page", "dashboard", "minimal").
-- No small talk or meta instructions; only the app description.
-- Output ONLY the prompt text, no quotes or preamble."""
+- Focus on: what the product does, main features, and any style (e.g. "landing page", "dashboard", "minimal").
+- No small talk, filler, or meta instructions; only the product specification.
+- Output ONLY the specification text, no quotes or preamble."""
 
-AGENT_SYSTEM = """You are an assistant that helps users get their app built via Lovable. You communicate over WhatsApp.
+
+AGENT_SYSTEM = """You are an assistant that helps users get their app built. You communicate over WhatsApp.
 
 You have:
-1. An enhanced app prompt (from the user's initial conversation).
+1. A cleaned app specification (from their voice conversation).
 2. The ability to ask 1-2 short clarifying questions if something is unclear.
-3. When ready, you must send the user a cost estimate and the Lovable build link.
+3. When ready, you confirm you're sending their specification to the build system (the server will forward it; you do not have a URL to paste).
 
 Respond with a JSON object only, no markdown:
 {
   "action": "clarify" | "send_link",
   "message": "The exact message to send to the user (plain text, WhatsApp-friendly).",
-  "updated_prompt": "Optional: if the user gave new details, the updated full prompt for Lovable. Omit or empty if no change."
+  "updated_prompt": "Optional: if the user gave new details, the updated full specification. Omit or empty if no change."
 }
 
-- If the user's last message adds useful detail, set "updated_prompt" and then either "clarify" (one more question) or "send_link".
-- If the user says they're done, or you have enough info, use "send_link". The "message" must say something like: "Here's an estimate and your link: ... [they will receive the link in a follow-up]."
+- Use "send_link" when the user is done or you have enough info (name kept for compatibility). Your message should say their spec is being sent to the builder, not that they will get a Lovable URL.
 - Keep messages very short (WhatsApp)."""
 
 
-async def enhance_prompt(transcript_or_summary: str) -> str:
-    """Turn raw transcript/summary into a single Lovable-ready prompt."""
+async def clean_for_builder(raw_transcript: str) -> str:
+    """Turn raw STT / transcript into a single builder-ready specification."""
     client = _client_get()
     messages = [
-        {"role": "system", "content": ENHANCE_SYSTEM},
-        {"role": "user", "content": transcript_or_summary},
+        {"role": "system", "content": CLEAN_FOR_BUILDER_SYSTEM},
+        {"role": "user", "content": raw_transcript},
     ]
-    print("[GPT enhance] request:", json.dumps({"model": settings.openai_model_enhance, "temperature": 0.3, "messages": messages}, indent=2, ensure_ascii=False))
+    print("[GPT clean] request:", json.dumps({"model": settings.openai_model_enhance, "temperature": 0.3, "messages": messages}, indent=2, ensure_ascii=False))
     r = await client.chat.completions.create(
         model=settings.openai_model_enhance,
         messages=messages,
         temperature=0.3,
     )
     text = (r.choices[0].message.content or "").strip()
-    print("[GPT enhance] response:", repr(text))
+    print("[GPT clean] response:", repr(text))
     return text
 
 
@@ -90,7 +90,7 @@ async def agent_next(
     client = _client_get()
     messages = [
         {"role": "system", "content": AGENT_SYSTEM},
-        {"role": "user", "content": f"Enhanced app prompt:\n{enhanced_prompt}"},
+        {"role": "user", "content": f"App specification:\n{enhanced_prompt}"},
     ]
     for entry in clarification_history:
         messages.append({"role": entry["role"], "content": entry["content"]})

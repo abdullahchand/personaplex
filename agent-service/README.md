@@ -1,52 +1,48 @@
-# Voice → GPT → WhatsApp → Lovable Agent
+# Voice conversation → transcribe → OpenAI → build webhook
 
-Backend for the flow: **User calls** → Persona gathers requirements → **Handoff** to this service → **GPT** enhances the prompt → **WhatsApp** agent clarifies (optional) → **Cost estimate** → **Lovable Build-with-URL** sent to user.
+Backend for: **full call audio** → **speech-to-text** → **OpenAI cleanup** (builder-ready spec) → **HTTP POST** to your own URL that runs the actual build flow.
+
+Historical note: we previously embedded prompts in a **Lovable Build-with-URL**; that is documented only in [docs/LOVABLE_BUILD_WITH_URL.md](./docs/LOVABLE_BUILD_WITH_URL.md) and is not used by the service anymore.
 
 ## Flow
 
-1. **Persona** (voice) collects what the user wants to build and gets their WhatsApp number, then calls **POST /handoff** with `phone` and `transcript` or `summary`.
-2. This service enhances the text with the **GPT API** and sends the first **WhatsApp** message (intro or clarifying question).
-3. User replies on **WhatsApp** → **webhook** → GPT agent decides: ask more or send link.
-4. When sending the link: we compute a **cost estimate** (credit band), build the **Lovable Build-with-URL**, and send both in WhatsApp. The user opens the link and creates the app in their Lovable account.
-
-See [ARCHITECTURE.md](./ARCHITECTURE.md) for details.
+1. **Moshi** (Persona) ends a WebSocket session and POSTs **multipart** form data to **`POST /handoff`**: field `audio` = stereo WAV (left = user, right = agent), optional `phone`.
+2. This service **transcribes** the audio (OpenAI **Whisper** API by default).
+3. **GPT** turns the raw transcript into a **single clean specification** for your builder.
+4. **`BUILD_WEBHOOK_URL`** receives a JSON body: `prompt`, `raw_transcript`, `phone` (optional).
+5. **WhatsApp** (optional): if configured and `phone` is present, the user gets a short confirmation; follow-up chat can still refine the stored spec and re-forward when the agent says “done”.
 
 ## Setup
 
 1. **Env**
+
    ```bash
    cp .env.example .env
-   # Edit .env: OPENAI_API_KEY, WHATSAPP_*, WEBHOOK_VERIFY_TOKEN, BASE_URL
    ```
 
-2. **WhatsApp Cloud API**
-   - Create a Meta app and add WhatsApp product.
-   - Set webhook URL to `https://<your-domain>/webhooks/whatsapp` and subscribe to `messages`.
-   - Use the same `WEBHOOK_VERIFY_TOKEN` in `.env`.
+   Set at least:
 
-3. **Install and run**
+   - `OPENAI_API_KEY` — used for Whisper + cleanup model
+   - `BUILD_WEBHOOK_URL` — your HTTPS endpoint that accepts the JSON payload (leave empty to skip forward; useful for local testing)
+
+   Optional: WhatsApp Cloud API vars and `BASE_URL` as before if you use the webhook.
+
+2. **Install and run**
+
    ```bash
    pip install -r requirements.txt
    uvicorn main:app --reload --port 8000
    ```
 
-4. **Handoff from Persona**
-   - Run Persona (Moshi) separately and set **`HANDOFF_URL`** to your agent-service handoff endpoint, e.g. `https://<your-domain>/handoff`.
-   - When a voice session ends, Persona will POST to that URL if the client provided a `phone` query param on the WebSocket.
-   - Example (what Persona sends): `{ "phone": "+1234567890", "transcript": "..." }`.
-   - You can also call the handoff API yourself from any backend:
-   ```json
-   POST /handoff
-   { "phone": "+1234567890", "transcript": "User said they want a todo app with dark mode..." }
-   ```
+3. **Moshi**
 
-## Cost check
-
-We do **not** call a Lovable API to get price or balance. We **estimate** a credit band from the prompt length and send that to the user before the link (e.g. “~1–2 credits”). The user uses their own Lovable subscription when they open the link.
+   Point **`--handoff-url`** at `http(s)://<agent-service>/handoff`. Moshi sends **multipart** with the conversation WAV, not JSON.
 
 ## API
 
-- **POST /handoff** — Body: `{ "phone": "+...", "transcript" or "summary": "..." }`. Creates session, enhances prompt, sends first WhatsApp message.
-- **GET /webhooks/whatsapp** — Meta verification (query: `hub.mode`, `hub.verify_token`, `hub.challenge`).
-- **POST /webhooks/whatsapp** — Incoming WhatsApp messages; agent replies.
-- **GET /health** — Health check.
+- **`POST /handoff`** (preferred): `multipart/form-data` with `audio` (WAV file), optional `phone`.
+- **`POST /handoff`**: `application/json` body `{ "phone"?, "transcript" | "summary" }` — skips STT; still cleans and forwards (for tests or non-audio clients).
+- **`GET /webhooks/whatsapp`** / **`POST /webhooks/whatsapp`** — Meta WhatsApp webhook (optional).
+- **`GET /health`**
+
+See [ARCHITECTURE.md](./ARCHITECTURE.md) for more structure (may still mention older naming in places).

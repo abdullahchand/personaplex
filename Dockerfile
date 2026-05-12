@@ -1,4 +1,4 @@
-# Persona (Moshi) voice server; includes server-side user STT (Whisper) for handoff transcript
+# Persona (Moshi) voice server; optional handoff POSTs full-conversation WAV to agent-service for remote STT
 ARG BASE_IMAGE="nvcr.io/nvidia/cuda"
 ARG BASE_IMAGE_TAG="12.4.1-runtime-ubuntu22.04"
 

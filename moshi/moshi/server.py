@@ -26,9 +26,11 @@
 
 import argparse
 import asyncio
+import json
 from dataclasses import dataclass
 import random
 import os
+import tempfile
 from pathlib import Path
 import tarfile
 import time
@@ -40,10 +42,10 @@ import aiohttp
 from aiohttp import web
 from huggingface_hub import hf_hub_download
 import numpy as np
+from scipy.io import wavfile
 import sentencepiece
 import sphn
 import torch
-import random
 
 from .client_utils import make_log, colorize
 from .models import loaders, MimiModel, LMModel, LMGen
@@ -53,30 +55,98 @@ from .utils.logging import setup_logger, ColorizedLog
 
 logger = setup_logger(__name__)
 
-# Lazy-loaded Whisper model for server-side user speech-to-text
-_whisper_model = None
+
+def _pcm_f32_to_i16(p: np.ndarray) -> np.ndarray:
+    p = np.clip(np.asarray(p, dtype=np.float32).flatten(), -1.0, 1.0)
+    return (p * 32767.0).astype(np.int16)
 
 
-def _get_whisper_model():
-    global _whisper_model
-    if _whisper_model is None:
-        import whisper
-        _whisper_model = whisper.load_model("base")
-    return _whisper_model
+def _write_conversation_wav(path: str, user_f32: np.ndarray, agent_f32: np.ndarray, sample_rate: int) -> None:
+    """Stereo WAV: channel 0 = caller, channel 1 = agent (padded to equal length)."""
+    lu = _pcm_f32_to_i16(user_f32)
+    ra = _pcm_f32_to_i16(agent_f32)
+    n = max(lu.size, ra.size)
+    if n == 0:
+        stereo = np.zeros((1, 2), dtype=np.int16)
+    else:
+        stereo = np.zeros((n, 2), dtype=np.int16)
+        stereo[: lu.size, 0] = lu
+        stereo[: ra.size, 1] = ra
+    wavfile.write(path, sample_rate, stereo)
 
 
-def _transcribe_user_audio_sync(pcm_24k: np.ndarray, sample_rate: int = 24000) -> str:
-    """Transcribe user PCM (float32, mono) from 24kHz to text using Whisper."""
-    from scipy.signal import resample
-    pcm_flat = np.asarray(pcm_24k).flatten().astype(np.float32)
-    if pcm_flat.size < 1000:
-        return ""
-    # Whisper expects 16 kHz
-    num_16k = int(round(pcm_flat.size * 16000 / sample_rate))
-    audio_16k = resample(pcm_flat, num_16k).astype(np.float32)
-    model = _get_whisper_model()
-    result = model.transcribe(audio_16k, fp16=torch.cuda.is_available(), language="en")
-    return (result.get("text") or "").strip()
+async def _post_conversation_handoff(
+    *,
+    handoff_url: str,
+    handoff_secret: str | None,
+    call_id: str,
+    phone: str,
+    user_audio: np.ndarray,
+    agent_audio: np.ndarray,
+    sample_rate: int,
+    clog: ColorizedLog,
+) -> None:
+    """
+    POST multipart handoff once after hang-up. Uploads conversation.wav only;
+    transcription and downstream build/messaging stay in call-agent.
+    """
+    if not user_audio.size and not agent_audio.size:
+        clog.log("warning", f"handoff skipped call_id={call_id}: no conversation audio")
+        return
+
+    fd, tmp_path = tempfile.mkstemp(suffix=".wav")
+    os.close(fd)
+    try:
+        _write_conversation_wav(tmp_path, user_audio, agent_audio, sample_rate)
+        with open(tmp_path, "rb") as wav_f:
+            wav_bytes = wav_f.read()
+
+        data = aiohttp.FormData()
+        data.add_field(
+            "audio",
+            wav_bytes,
+            filename="conversation.wav",
+            content_type="audio/wav",
+        )
+        if phone:
+            data.add_field("phone", phone)
+        if call_id:
+            data.add_field("call_id", call_id)
+
+        headers: dict[str, str] = {}
+        if handoff_secret:
+            headers["x-handoff-secret"] = handoff_secret
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(handoff_url, data=data, headers=headers) as resp:
+                body = await resp.text()
+                if 200 <= resp.status < 300:
+                    session_id = None
+                    try:
+                        payload = json.loads(body)
+                        if isinstance(payload, dict):
+                            session_id = payload.get("session_id")
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                    clog.log(
+                        "info",
+                        f"handoff accepted status={resp.status} call_id={call_id}"
+                        + (f" session_id={session_id}" if session_id else ""),
+                    )
+                else:
+                    clog.log(
+                        "error",
+                        f"handoff POST failed call_id={call_id}: {resp.status} {body}",
+                    )
+    except Exception as e:
+        clog.log("error", f"handoff POST error call_id={call_id}: {e}")
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
+
 DeviceString = Literal["cuda"] | Literal["cpu"] #| Literal["mps"]
 
 def torch_auto_device(requested: Optional[DeviceString] = None) -> torch.device:
@@ -121,13 +191,15 @@ class ServerState:
 
     def __init__(self, mimi: MimiModel, other_mimi: MimiModel, text_tokenizer: sentencepiece.SentencePieceProcessor,
                  lm: LMModel, device: str | torch.device, voice_prompt_dir: str | None = None,
-                 save_voice_prompt_embeddings: bool = False, handoff_url: Optional[str] = None):
+                 save_voice_prompt_embeddings: bool = False, handoff_url: Optional[str] = None,
+                 handoff_secret: Optional[str] = None):
         self.mimi = mimi
         self.other_mimi = other_mimi
         self.text_tokenizer = text_tokenizer
         self.device = device
         self.voice_prompt_dir = voice_prompt_dir
         self.handoff_url = (handoff_url or "").strip() or None
+        self.handoff_secret = (handoff_secret or "").strip() or None
         self.frame_size = int(self.mimi.sample_rate / self.mimi.frame_rate)
         self.lm_gen = LMGen(lm,
                             audio_silence_frame_cnt=int(0.5 * self.mimi.frame_rate),
@@ -197,8 +269,10 @@ class ServerState:
         seed = int(request["seed"]) if "seed" in request.query else None
 
         phone = request.query.get("phone", "").strip()
-        transcript_parts: list[str] = []  # what the agent (Persona) said
-        user_pcm_chunks: list[np.ndarray] = []  # accumulate user audio for server-side STT
+        call_id = request.query.get("call_id", "").strip() or secrets.token_urlsafe(16)
+        transcript_parts: list[str] = []  # agent text streamed to the client (not sent on handoff)
+        user_pcm_chunks: list[np.ndarray] = []  # caller mic PCM (one chunk per processed frame)
+        agent_pcm_parts: list[np.ndarray] = []  # agent TTS PCM in decode order
 
         async def recv_loop():
             nonlocal close
@@ -249,7 +323,7 @@ class ServerState:
                     be = time.time()
                     chunk = all_pcm_data[: self.frame_size]
                     all_pcm_data = all_pcm_data[self.frame_size:]
-                    # Accumulate user PCM for server-side speech-to-text at session end
+                    # Accumulate caller PCM for full-conversation WAV at session end
                     user_pcm_chunks.append(np.array(chunk, dtype=np.float32))
                     chunk = torch.from_numpy(chunk)
                     chunk = chunk.to(device=self.device)[None, None]
@@ -263,6 +337,9 @@ class ServerState:
                         main_pcm = self.mimi.decode(tokens[:, 1:9])
                         _ = self.other_mimi.decode(tokens[:, 1:9])
                         main_pcm = main_pcm.cpu()
+                        agent_pcm_parts.append(
+                            np.asarray(main_pcm[0, 0].numpy(), dtype=np.float32).flatten()
+                        )
                         opus_writer.append_pcm(main_pcm[0, 0].numpy())
                         text_token = tokens[0, 0, 0].item()
                         if text_token not in (0, 3):
@@ -337,37 +414,27 @@ class ServerState:
                         pass
                 await ws.close()
                 clog.log("info", "session closed")
-                # Optional: POST handoff (phone + transcript) to agent-service when HANDOFF_URL is set
                 if self.handoff_url:
-                    # Server-side STT for user speech
-                    user_text = ""
-                    if user_pcm_chunks:
-                        try:
-                            user_audio = np.concatenate([c.flatten() for c in user_pcm_chunks])
-                            user_text = await asyncio.to_thread(
-                                _transcribe_user_audio_sync, user_audio, self.mimi.sample_rate
-                            )
-                        except Exception as e:
-                            clog.log("warning", f"user STT failed: {e}")
-                    agent_text = " ".join(transcript_parts).strip() if transcript_parts else ""
-                    if user_text and agent_text:
-                        transcript_text = f"User: {user_text}\n\nAgent: {agent_text}"
-                    elif user_text:
-                        transcript_text = f"User: {user_text}"
-                    elif agent_text:
-                        transcript_text = f"Agent: {agent_text}"
-                    else:
-                        transcript_text = "(no transcript)"
-                    try:
-                        async with aiohttp.ClientSession() as session:
-                            payload = {"phone": phone or "", "transcript": transcript_text or "(no transcript)"}
-                            async with session.post(self.handoff_url, json=payload) as resp:
-                                if resp.status >= 400:
-                                    clog.log("error", f"handoff POST failed: {resp.status} {await resp.text()}")
-                                else:
-                                    clog.log("info", f"handoff sent to {self.handoff_url}")
-                    except Exception as e:
-                        clog.log("error", f"handoff POST error: {e}")
+                    user_audio = (
+                        np.concatenate([c.flatten() for c in user_pcm_chunks]).astype(np.float32)
+                        if user_pcm_chunks
+                        else np.array([], dtype=np.float32)
+                    )
+                    agent_audio = (
+                        np.concatenate(agent_pcm_parts).astype(np.float32)
+                        if agent_pcm_parts
+                        else np.array([], dtype=np.float32)
+                    )
+                    await _post_conversation_handoff(
+                        handoff_url=self.handoff_url,
+                        handoff_secret=self.handoff_secret,
+                        call_id=call_id,
+                        phone=phone,
+                        user_audio=user_audio,
+                        agent_audio=agent_audio,
+                        sample_rate=self.mimi.sample_rate,
+                        clog=clog,
+                    )
                 # await asyncio.gather(opus_loop(), recv_loop(), send_loop())
         clog.log("info", "done with connection")
         return ws
@@ -458,8 +525,14 @@ def main():
         "--handoff-url",
         type=str,
         default=os.environ.get("HANDOFF_URL", ""),
-        help="When set, POST { phone, transcript } to this URL when a session ends. "
-             "Used to hand off to agent-service. Client must pass phone as query param.",
+        help="When set, POST multipart conversation.wav to this URL once when a session ends "
+             "(call-agent /handoff). Client may pass phone and call_id as WebSocket query params.",
+    )
+    parser.add_argument(
+        "--handoff-secret",
+        type=str,
+        default=os.environ.get("HANDOFF_SHARED_SECRET", ""),
+        help="Optional shared secret sent as x-handoff-secret on handoff POST.",
     )
 
     args = parser.parse_args()
@@ -525,6 +598,7 @@ def main():
         voice_prompt_dir=args.voice_prompt_dir,
         save_voice_prompt_embeddings=False,
         handoff_url=args.handoff_url or None,
+        handoff_secret=args.handoff_secret or None,
     )
     logger.info("warming up the model")
     state.warmup()
